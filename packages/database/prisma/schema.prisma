@@ -1,0 +1,766 @@
+// Nota Prisma 5.22.0 + Termux/Android: process.platform === "android" no
+// tiene rama de detección en @prisma/get-platform (confirmado en
+// dist/chunk-YDM7ULQH.js), así que "prisma generate" no autodetecta el
+// binaryTarget correcto en Termux. "native" preserva la detección
+// automática existente para producción x86_64/CI; los tres targets arm64
+// cubren que no se sabe de antemano cuál OpenSSL trae el Termux del
+// dispositivo. En runtime, PRISMA_QUERY_ENGINE_LIBRARY selecciona el que
+// realmente cargue sin error de símbolos/arquitectura.
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions", "fullTextSearch"]
+  binaryTargets   = ["native", "linux-arm64-openssl-1.1.x", "linux-arm64-openssl-3.0.x", "linux-arm64-openssl-1.0.x"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [pgvector(map: "vector"), pgcrypto, pg_trgm]
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  USER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum TeamRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  CANCELED
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  PAST_DUE
+  UNPAID
+  PAUSED
+}
+
+enum PlanTier {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+enum BillingInterval {
+  MONTHLY
+  YEARLY
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  TOOL
+}
+
+enum ApiKeyStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+enum FileStatus {
+  UPLOADING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum AgentStatus {
+  IDLE
+  RUNNING
+  COMPLETED
+  FAILED
+  PAUSED
+}
+
+enum WorkflowStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  REGISTER
+  PASSWORD_RESET
+  EMAIL_VERIFY
+  PROFILE_UPDATE
+  API_KEY_CREATE
+  API_KEY_REVOKE
+  SUBSCRIPTION_CREATE
+  SUBSCRIPTION_CANCEL
+  SUBSCRIPTION_UPDATE
+  TEAM_INVITE
+  TEAM_REMOVE
+  ADMIN_ACTION
+}
+
+// ─── NextAuth Models ──────────────────────────────────────────────────────────
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id")
+  expires      DateTime
+  userAgent    String?  @map("user_agent")
+  ipAddress    String?  @map("ip_address")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ─── User ─────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime? @map("email_verified")
+  image         String?
+  passwordHash  String?   @map("password_hash")
+  role          UserRole  @default(USER)
+
+  // Profile
+  bio           String?
+  company       String?
+  website       String?
+  timezone      String?   @default("UTC")
+  locale        String?   @default("en")
+
+  // Usage limits (per billing period)
+  tokensUsed    Int       @default(0) @map("tokens_used")
+  messagesUsed  Int       @default(0) @map("messages_used")
+  storageUsed   BigInt    @default(0) @map("storage_used") // bytes
+
+  // Stripe
+  stripeCustomerId String? @unique @map("stripe_customer_id")
+
+  // Timestamps
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  // Relations
+  accounts      Account[]
+  sessions      Session[]
+  apiKeys       ApiKey[]
+  conversations Conversation[]
+  messages      Message[]
+  files         File[]
+  subscription  Subscription?
+  teamMembers   TeamMember[]
+  ownedTeams    Team[]         @relation("TeamOwner")
+  auditLogs     AuditLog[]
+  notifications Notification[]
+  agentRuns     AgentRun[]
+  usageLogs     UsageLog[]
+  memories      UserMemory[]
+  memoryEmbeddings MemoryEmbedding[]
+  settings      UserSettings?
+  tasks         Task[]
+  events        Event[]
+
+  @@index([email])
+  @@index([stripeCustomerId])
+  @@index([createdAt])
+  @@map("users")
+}
+
+// ─── Team / Multi-tenant ──────────────────────────────────────────────────────
+
+model Team {
+  id          String  @id @default(cuid())
+  name        String
+  slug        String  @unique
+  description String?
+  logo        String?
+  ownerId     String  @map("owner_id")
+
+  // Billing
+  stripeCustomerId String? @unique @map("stripe_customer_id")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  owner        User         @relation("TeamOwner", fields: [ownerId], references: [id])
+  members      TeamMember[]
+  subscription Subscription?
+  invites      TeamInvite[]
+  apiKeys      ApiKey[]
+
+  @@index([slug])
+  @@map("teams")
+}
+
+model TeamMember {
+  id     String   @id @default(cuid())
+  teamId String   @map("team_id")
+  userId String   @map("user_id")
+  role   TeamRole @default(MEMBER)
+
+  joinedAt DateTime @default(now()) @map("joined_at")
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@map("team_members")
+}
+
+model TeamInvite {
+  id        String   @id @default(cuid())
+  teamId    String   @map("team_id")
+  email     String
+  role      TeamRole @default(MEMBER)
+  token     String   @unique @default(cuid())
+  expiresAt DateTime @map("expires_at")
+  acceptedAt DateTime? @map("accepted_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([email])
+  @@map("team_invites")
+}
+
+// ─── Billing / Subscriptions ──────────────────────────────────────────────────
+
+model Plan {
+  id          String          @id @default(cuid())
+  name        String
+  tier        PlanTier
+  description String?
+  features    Json            @default("[]")
+
+  // Limits
+  maxTokensPerMonth  Int    @map("max_tokens_per_month")
+  maxMessages        Int    @map("max_messages")
+  maxStorage         BigInt @map("max_storage") // bytes
+  maxTeamMembers     Int    @default(1) @map("max_team_members")
+  maxApiKeys         Int    @default(3) @map("max_api_keys")
+  maxConversations   Int    @map("max_conversations")
+  customModels       Boolean @default(false) @map("custom_models")
+  prioritySupport    Boolean @default(false) @map("priority_support")
+
+  // Stripe
+  stripePriceIdMonthly String? @map("stripe_price_id_monthly")
+  stripePriceIdYearly  String? @map("stripe_price_id_yearly")
+  priceMonthly         Decimal? @db.Decimal(10, 2) @map("price_monthly")
+  priceYearly          Decimal? @db.Decimal(10, 2) @map("price_yearly")
+
+  isActive  Boolean @default(true) @map("is_active")
+  sortOrder Int     @default(0) @map("sort_order")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id     String @id @default(cuid())
+  userId String? @unique @map("user_id")
+  teamId String? @unique @map("team_id")
+  planId String  @map("plan_id")
+
+  status           SubscriptionStatus
+  billingInterval  BillingInterval    @map("billing_interval")
+
+  // Stripe
+  stripeSubscriptionId String? @unique @map("stripe_subscription_id")
+  stripePriceId        String? @map("stripe_price_id")
+  stripeCurrentPeriodStart DateTime? @map("stripe_current_period_start")
+  stripeCurrentPeriodEnd   DateTime? @map("stripe_current_period_end")
+  stripeCancelAtPeriodEnd  Boolean   @default(false) @map("stripe_cancel_at_period_end")
+  stripeTrialEnd           DateTime? @map("stripe_trial_end")
+
+  canceledAt DateTime? @map("canceled_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  user     User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team     Team?     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  plan     Plan      @relation(fields: [planId], references: [id])
+  invoices Invoice[]
+
+  @@index([stripeSubscriptionId])
+  @@map("subscriptions")
+}
+
+model Invoice {
+  id             String @id @default(cuid())
+  subscriptionId String @map("subscription_id")
+
+  stripeInvoiceId String  @unique @map("stripe_invoice_id")
+  amountPaid      Decimal @db.Decimal(10, 2) @map("amount_paid")
+  currency        String  @default("usd")
+  status          String
+  hostedInvoiceUrl String? @map("hosted_invoice_url")
+  invoicePdf      String? @map("invoice_pdf")
+
+  periodStart DateTime @map("period_start")
+  periodEnd   DateTime @map("period_end")
+  paidAt      DateTime? @map("paid_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+
+  @@index([stripeInvoiceId])
+  @@map("invoices")
+}
+
+// ─── API Keys ─────────────────────────────────────────────────────────────────
+
+model ApiKey {
+  id          String       @id @default(cuid())
+  userId      String?      @map("user_id")
+  teamId      String?      @map("team_id")
+  name        String
+  keyHash     String       @unique @map("key_hash")
+  keyPrefix   String       @map("key_prefix") // first 8 chars shown to user
+  status      ApiKeyStatus @default(ACTIVE)
+  scopes      String[]     @default([]) // ["chat:read", "chat:write", ...]
+  lastUsedAt  DateTime?    @map("last_used_at")
+  expiresAt   DateTime?    @map("expires_at")
+  requestCount Int         @default(0) @map("request_count")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team Team? @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([keyHash])
+  @@index([userId])
+  @@map("api_keys")
+}
+
+// ─── Chat ─────────────────────────────────────────────────────────────────────
+
+model Conversation {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  title  String @default("New Conversation")
+
+  // Model config
+  model       String  @default("gpt-4o-mini")
+  provider    String  @default("openai")
+  systemPrompt String? @db.Text @map("system_prompt")
+  temperature Float?
+  maxTokens   Int?    @map("max_tokens")
+
+  // Usage
+  totalTokens Int @default(0) @map("total_tokens")
+
+  // Metadata
+  isPinned   Boolean   @default(false) @map("is_pinned")
+  isArchived Boolean   @default(false) @map("is_archived")
+  metadata   Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages Message[]
+  memories UserMemory[]
+  events   Event[]
+  taskLinks TaskConversationLink[]
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("conversations")
+}
+
+model Message {
+  id             String      @id @default(cuid())
+  conversationId String      @map("conversation_id")
+  userId         String?     @map("user_id")
+  role           MessageRole
+  content        String      @db.Text
+
+  // Model info
+  model    String?
+  provider String?
+
+  // Tool calls (for function calling)
+  toolCalls   Json? @map("tool_calls")
+  toolCallId  String? @map("tool_call_id")
+
+  // Usage
+  promptTokens     Int? @map("prompt_tokens")
+  completionTokens Int? @map("completion_tokens")
+  totalTokens      Int? @map("total_tokens")
+
+  // File attachments
+  attachments Json? // Array of {fileId, name, type, url}
+
+  metadata  Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId])
+  @@index([createdAt])
+  @@map("messages")
+}
+
+// ─── Files & Knowledge Base ───────────────────────────────────────────────────
+
+model File {
+  id       String     @id @default(cuid())
+  userId   String     @map("user_id")
+  name     String
+  mimeType String     @map("mime_type")
+  size     BigInt
+  url      String
+  s3Key    String     @map("s3_key")
+  status   FileStatus @default(UPLOADING)
+
+  // Processing metadata
+  chunkCount Int? @map("chunk_count")
+  errorMsg   String? @map("error_msg")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chunks Chunk[]
+
+  @@index([userId])
+  @@map("files")
+}
+
+model Chunk {
+  id       String @id @default(cuid())
+  fileId   String @map("file_id")
+  content  String @db.Text
+  chunkIndex Int  @map("chunk_index")
+
+  // pgvector halfvec(1024): Cohere embed-v4.0 con output_dimension=1024.
+  // Sincronizado con la migración 20260920000100_embeddings_foundation. Si se
+  // cambia aquí sin migración (o al revés), `prisma migrate dev` detecta drift.
+  embedding Unsupported("halfvec(1024)")?
+
+  metadata Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  file File @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@index([fileId])
+  @@map("chunks")
+}
+
+// ─── AI Agents ────────────────────────────────────────────────────────────────
+
+model AgentWorkflow {
+  id          String         @id @default(cuid())
+  userId      String         @map("user_id")
+  name        String
+  description String?
+  status      WorkflowStatus @default(DRAFT)
+
+  // Workflow definition (nodes, edges, config)
+  definition  Json
+
+  // Tools enabled for this workflow
+  enabledTools String[] @default([]) @map("enabled_tools")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  runs AgentRun[]
+
+  @@map("agent_workflows")
+}
+
+model AgentRun {
+  id         String      @id @default(cuid())
+  workflowId String?     @map("workflow_id")
+  userId     String      @map("user_id")
+  status     AgentStatus @default(IDLE)
+
+  input   Json
+  output  Json?
+  steps   Json? // Array of step execution details
+
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  errorMsg    String?   @map("error_msg")
+
+  tokensUsed Int @default(0) @map("tokens_used")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  workflow AgentWorkflow? @relation(fields: [workflowId], references: [id], onDelete: SetNull)
+  user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@map("agent_runs")
+}
+
+// ─── Usage Tracking ───────────────────────────────────────────────────────────
+
+model UsageLog {
+  id       String @id @default(cuid())
+  userId   String @map("user_id")
+
+  // AI usage
+  provider    String?
+  model       String?
+  operation   String // "chat", "embedding", "agent", etc.
+  inputTokens Int     @default(0) @map("input_tokens")
+  outputTokens Int    @default(0) @map("output_tokens")
+  costUsd     Decimal? @db.Decimal(10, 6) @map("cost_usd")
+
+  // Request info
+  apiKeyId    String? @map("api_key_id")
+  requestId   String? @map("request_id")
+  latencyMs   Int?    @map("latency_ms")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("usage_logs")
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+
+model Notification {
+  id      String  @id @default(cuid())
+  userId  String  @map("user_id")
+  title   String
+  body    String
+  type    String  // "info", "success", "warning", "error"
+  link    String?
+  isRead  Boolean @default(false) @map("is_read")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+// ─── Audit Logs ───────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  userId    String?     @map("user_id")
+  action    AuditAction
+  resource  String?
+  resourceId String?    @map("resource_id")
+  metadata  Json?
+  ipAddress String?     @map("ip_address")
+  userAgent String?     @map("user_agent")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ─── Feature Flags ────────────────────────────────────────────────────────────
+
+model FeatureFlag {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  name        String
+  description String?
+  enabled     Boolean  @default(false)
+  rolloutPct  Int      @default(0) @map("rollout_pct") // 0-100
+  rules       Json?    // Targeting rules
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("feature_flags")
+}
+
+// ─── Memoria de AXIS ──────────────────────────────────────────────────────────
+// Las tablas se crean con SQL en la migración 20260920000200_memory_tasks_events
+// (CHECKs, índices parciales, trigram y triggers no son expresables en Prisma).
+// Estos modelos solo dan acceso tipado; la fuente de verdad del esquema es el SQL.
+// Los campos de texto restringidos por CHECK se tipan como String a propósito:
+// la validación real vive en la BD y en lib/memory/schemas.ts (Zod).
+
+model UserMemory {
+  id         String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  userId     String   @map("user_id")
+  category   String
+  key        String
+  value      String
+  kind       String   @default("stated_state")
+  durability String   @default("stable")
+  source     String   @default("explicit_user_statement")
+  confidence Float    @default(1.0) @db.Real
+  importance Int      @default(3) @db.SmallInt
+  visibility String   @default("private")
+  reason     String?
+  sourceConversationId String? @map("source_conversation_id")
+  metadata   Json     @default("{}")
+  status     String   @default("active")
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz(6)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(6)
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [sourceConversationId], references: [id], onDelete: SetNull)
+  embedding    MemoryEmbedding?
+
+  @@map("user_memories")
+}
+
+model MemoryEmbedding {
+  memoryId    String   @id @map("memory_id")
+  userId      String   @map("user_id")
+  // halfvec(1024). Nunca se lee con Prisma: se escribe/consulta con SQL crudo.
+  embedding   Unsupported("halfvec(1024)")
+  model       String
+  contentHash String   @map("content_hash")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  memory UserMemory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("memory_embeddings")
+}
+
+model UserSettings {
+  userId                String   @id @map("user_id")
+  memoryEnabled         Boolean  @default(true) @map("memory_enabled")
+  memoryLearningEnabled Boolean  @default(true) @map("memory_learning_enabled")
+  proactiveEnabled      Boolean  @default(false) @map("proactive_enabled")
+  proactiveMode         String   @default("only_when_relevant") @map("proactive_mode")
+  quietHoursStart       DateTime? @map("quiet_hours_start") @db.Time(6)
+  quietHoursEnd         DateTime? @map("quiet_hours_end") @db.Time(6)
+  maxProactivePerDay    Int      @default(2) @map("max_proactive_per_day") @db.SmallInt
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
+}
+
+model Task {
+  id          String    @id @default(dbgenerated("(gen_random_uuid())::text"))
+  userId      String    @map("user_id")
+  title       String
+  description String?
+  status      String    @default("open")
+  priority    Int       @default(2) @db.SmallInt
+  dueAt       DateTime? @map("due_at") @db.Timestamptz(6)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  user  User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  links TaskConversationLink[]
+
+  @@map("tasks")
+}
+
+model TaskConversationLink {
+  taskId         String   @map("task_id")
+  conversationId String   @map("conversation_id")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  task         Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, conversationId])
+  @@index([conversationId])
+  @@map("task_conversation_links")
+}
+
+model Event {
+  id          String    @id @default(dbgenerated("(gen_random_uuid())::text"))
+  userId      String    @map("user_id")
+  title       String
+  description String?
+  startsAt    DateTime  @map("starts_at") @db.Timestamptz(6)
+  endsAt      DateTime? @map("ends_at") @db.Timestamptz(6)
+  allDay      Boolean   @default(false) @map("all_day")
+  sourceConversationId String? @map("source_conversation_id")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [sourceConversationId], references: [id], onDelete: SetNull)
+
+  @@index([userId, startsAt])
+  @@map("events")
+}
+
+// Contador global del presupuesto mensual de APIs externas (ver
+// apps/web/lib/embeddings/budget-store.ts). Se accede con SQL crudo atómico,
+// pero se declara aquí para que Prisma no lo considere drift.
+model ApiCallBudget {
+  resource  String
+  period    String
+  callsUsed Int      @default(0) @map("calls_used")
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@id([resource, period])
+  @@map("api_call_budget")
+}

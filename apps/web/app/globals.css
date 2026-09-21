@@ -1,0 +1,182 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ────────────────────────────────────────────────────────────────────────
+   AXIS — sistema de tokens visual
+   Paleta: negro / blanco / grises, con azul AXIS como único acento.
+   Formato HSL (compatible con Tailwind v3 + hsl(var(--x)) en tailwind.config.ts)
+   ──────────────────────────────────────────────────────────────────────── */
+
+@layer base {
+  :root {
+    /* AXIS es un producto oscuro por identidad — :root y .dark comparten
+       la misma paleta a propósito, no hay modo claro distinto por ahora. */
+    --background: 240 6% 6%;
+    --foreground: 0 0% 96%;
+
+    --card: 240 6% 9%;
+    --card-foreground: 0 0% 96%;
+
+    --popover: 240 6% 8%;
+    --popover-foreground: 0 0% 96%;
+
+    /* Acento AXIS — monocromático: blanco/gris casi puro, el contraste
+       hace el trabajo que antes hacía el color. Sin azul en toda la app. */
+    --primary: 0 0% 92%;
+    --primary-foreground: 240 6% 9%;
+
+    --secondary: 240 5% 14%;
+    --secondary-foreground: 0 0% 90%;
+
+    --muted: 240 5% 13%;
+    --muted-foreground: 240 4% 58%;
+
+    --accent: 240 5% 15%;
+    --accent-foreground: 0 0% 96%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Bordes deliberadamente sutiles — visibles solo de cerca */
+    --border: 240 6% 16%;
+    --input: 240 6% 16%;
+    --ring: 0 0% 92%;
+
+    --radius: 0.75rem;
+
+    --sidebar-background: 240 6% 5%;
+    --sidebar-foreground: 0 0% 90%;
+    --sidebar-primary: 0 0% 92%;
+    --sidebar-primary-foreground: 240 6% 9%;
+    --sidebar-accent: 240 5% 12%;
+    --sidebar-accent-foreground: 0 0% 96%;
+    --sidebar-border: 240 6% 14%;
+    --sidebar-ring: 0 0% 92%;
+
+    /* Puente de compatibilidad: MagicCard (components/ui/magic-card.tsx)
+       fue instalado vía el registro Tailwind v4 de Magic UI y referencia
+       var(--color-background)/var(--color-border) directamente. El resto
+       del proyecto usa la convención v3 sin el prefijo "color-", así que
+       exponemos alias en vez de reescribir la lógica interna del componente. */
+    --color-background: hsl(var(--background));
+    --color-border: hsl(var(--border));
+  }
+
+  .dark {
+    --background: 240 6% 6%;
+    --foreground: 0 0% 96%;
+    --card: 240 6% 9%;
+    --card-foreground: 0 0% 96%;
+    --popover: 240 6% 8%;
+    --popover-foreground: 0 0% 96%;
+    --primary: 0 0% 92%;
+    --primary-foreground: 240 6% 9%;
+    --secondary: 240 5% 14%;
+    --secondary-foreground: 0 0% 90%;
+    --muted: 240 5% 13%;
+    --muted-foreground: 240 4% 58%;
+    --accent: 240 5% 15%;
+    --accent-foreground: 0 0% 96%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 6% 16%;
+    --input: 240 6% 16%;
+    --ring: 0 0% 92%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* ─── Custom scrollbar ─────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-border rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/30;
+}
+
+/* ─── Prose (markdown) overrides ───────────────────────────────────────────── */
+.prose pre {
+  @apply bg-muted rounded-lg p-4 overflow-x-auto text-sm;
+}
+.prose code:not(pre code) {
+  @apply bg-muted px-1.5 py-0.5 rounded text-sm font-mono;
+}
+
+/* ─── Streaming cursor ─────────────────────────────────────────────────────── */
+.streaming-cursor::after {
+  content: "▋";
+  @apply animate-pulse text-primary inline-block ml-0.5;
+}
+
+/* ─── AXIS accent text ───────────────────────────────────────────────────────
+   Reemplaza el .gradient-text violeta genérico anterior: un único azul
+   sólido (el acento AXIS), sin gradiente — coherente con "no queremos
+   más efectos, queremos una interfaz mejor". */
+.axis-accent-text {
+  @apply text-primary;
+}
+
+/* ─── AXIS — materiales del chat ─────────────────────────────────────────────
+   Todo lo de abajo es puntual y barato: sin bucles, sin rAF, sin blur sobre
+   superficies grandes. Las animaciones se disparan por interacción/transición
+   y se anulan con prefers-reduced-motion. */
+
+/* Entrada de mensaje: corta y discreta (más breve que .animate-fade-in) */
+@keyframes axis-msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-msg-in {
+  animation: axis-msg-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Fondo del chat: casi negro con iluminación localizada MUY tenue.
+   Gradientes estáticos (se pintan una vez): no son una superficie glass. */
+.axis-chat-bg {
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(80% 45% at 50% -8%, hsl(0 0% 100% / 0.035), transparent 70%),
+    radial-gradient(70% 40% at 50% 108%, hsl(0 0% 100% / 0.03), transparent 70%);
+  background-repeat: no-repeat;
+}
+
+/* Zona del composer: separación visual con los mensajes mediante un degradado
+   de fundido (no una línea dura ni un blur sobre toda la franja). */
+.axis-composer-zone {
+  background: linear-gradient(
+    to top,
+    hsl(var(--background)) 55%,
+    hsl(var(--background) / 0.85) 78%,
+    transparent
+  );
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-msg-in {
+    animation: none;
+  }
+}
